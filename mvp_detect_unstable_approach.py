@@ -696,11 +696,17 @@ def save_plot(out_base: Path, approach: pd.DataFrame, events: List[Event], profi
     lines2, labels2 = ax2.get_legend_handles_labels()
     # Extract legend entries from both axes
 
-    ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", framealpha=0.9)
-    # Combine into one legend / Place in upper-right corner
+    ax.legend(
+        lines1 + lines2,
+        labels1 + labels2,
+        loc="center left",
+        bbox_to_anchor=(1.06, 0.8),
+        framealpha=0.95
+    )
 
 
-    fig.tight_layout()    # Adjusts spacing to prevent label overlap / Especially important with twin axes
+
+    fig.subplots_adjust(right=0.78)
     fig.savefig(out_path, dpi=150)    # Writes the image to file / dpi=150 gives good clarity without huge file size
     plt.close(fig)    # Frees memory / Important when preprocessing many plots
     
