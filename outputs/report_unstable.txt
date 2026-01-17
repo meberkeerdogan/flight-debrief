@@ -8,11 +8,22 @@ Summary metrics below gate:
   - pct_sink_bad: 29.1%
   - pct_bank_bad: 0.0%
   - pct_pitch_bad: 0.0%
+  - overall_severity: 86.1 (0-100)
 
 Detected unstable events:
-  - High sink rate: t=95.0s→96.8s, AGL=492→471 ft, worst=-1278.87
-  - High sink rate: t=101.0s→102.8s, AGL=422→401 ft, worst=-1297.12
-  - High sink rate: t=107.0s→108.8s, AGL=352→331 ft, worst=-1255.56
-  - High sink rate: t=113.0s→114.8s, AGL=282→261 ft, worst=-1289.71
-  - High sink rate: t=119.0s→120.8s, AGL=212→191 ft, worst=-1281.78
-  - High sink rate: t=125.0s→126.8s, AGL=142→121 ft, worst=-1289.76
+  - High sink rate: t=95.0s→97.0s, AGL=492→471 ft, worst=-1278.87
+  - High sink rate: t=101.0s→103.0s, AGL=422→401 ft, worst=-1297.12
+  - High sink rate: t=107.0s→109.0s, AGL=352→331 ft, worst=-1255.56
+  - High sink rate: t=113.0s→115.0s, AGL=282→261 ft, worst=-1289.71
+  - High sink rate: t=119.0s→121.0s, AGL=212→191 ft, worst=-1281.78
+  - High sink rate: t=125.0s→127.0s, AGL=142→121 ft, worst=-1289.76
+
+Overall severity (0-100): 86.1
+
+Detected unstable events:
+  - High sink rate: t=95.0s→97.0s, AGL=492→471 ft, worst=-1278.87, severity=20.7
+  - High sink rate: t=101.0s→103.0s, AGL=422→401 ft, worst=-1297.12, severity=24.9
+  - High sink rate: t=107.0s→109.0s, AGL=352→331 ft, worst=-1255.56, severity=23.9
+  - High sink rate: t=113.0s→115.0s, AGL=282→261 ft, worst=-1289.71, severity=30.0
+  - High sink rate: t=119.0s→121.0s, AGL=212→191 ft, worst=-1281.78, severity=31.9
+  - High sink rate: t=125.0s→127.0s, AGL=142→121 ft, worst=-1289.76, severity=35.7

@@ -63,6 +63,7 @@ class Event:    # This is a “detected violation segment”: name, time window,
     agl_start_ft: float # Altitude AGL (feet) at start of event
     agl_end_ft: float # Altitude AGL (feet) at end of event
     worst_value: float # How bad did it get during this event?
+    severity: float = 0.0  # severity score 
 
 """
 For the worst_value field, its meaning depends on the rule:
@@ -278,7 +279,7 @@ def find_continuous_events(
                 Event(
                     rule=rule_name,    # label this event with the rule’s name.
                     t_start=float(seg_t[0]),    # start time is first time in the segment.
-                    t_end=float(seg_t[-1]),    # end time is last time in the segment.
+                    t_end=float(seg_t[-1] + dt),    # end time is last time in the segment.
                     agl_start_ft=float(seg_agl[0]),    # AGL at start.
                     agl_end_ft=float(seg_agl[-1]),   # AGL at end.
                     worst_value=worst_val,    # the severity number we computed.
@@ -288,6 +289,58 @@ def find_continuous_events(
         i = j    # Move i to j to continue searching for next event.
 
     return events
+
+
+def compute_event_severity(e: Event, profile: AircraftProfile) -> float:
+    """
+    Returns a 0-100 severity score for one event.
+
+    Components:
+    - magnitude factor: how far beyond the threshold
+    - duration factor: longer violations are worse
+    - altitude factor: low altitude violations are worse
+    """
+    duration_s = max(0.0, e.t_end - e.t_start)
+    agl_min = min(e.agl_start_ft, e.agl_end_ft)  # descending so end is usually lower
+
+    # --- Magnitude factor (0..1) ---
+    # We convert "how far beyond limit" into a normalized ratio.
+    # Then clamp to 1.0 so it cannot blow up.
+    if e.rule == "High sink rate":
+        # sink limit is negative: e.g. -1000 fpm.
+        # worst_value is also negative: e.g. -1279 fpm.
+        exceed = max(0.0, abs(e.worst_value) - abs(profile.sink_rate_limit_fpm))  # 279
+        # Normalize: 500 fpm exceed -> full magnitude score (tunable)
+        mag = min(1.0, exceed / 500.0)
+
+    elif e.rule == "Speed out of band":
+        exceed = max(0.0, e.worst_value - profile.speed_tol_kt)  # worst_value is abs(speed_err)
+        mag = min(1.0, exceed / profile.speed_tol_kt)  # exceed by tol -> full
+
+    elif e.rule == "Excessive bank":
+        exceed = max(0.0, e.worst_value - profile.bank_limit_deg)  # worst_value is abs(roll)
+        mag = min(1.0, exceed / profile.bank_limit_deg)
+
+    elif e.rule == "Pitch chasing":
+        exceed = max(0.0, e.worst_value - profile.pitch_std_limit_deg)  # worst_value is pitch_std
+        mag = min(1.0, exceed / profile.pitch_std_limit_deg)
+
+    else:
+        mag = 0.0
+
+    # --- Duration factor (0.5..1.0) ---
+    # We don’t want duration to zero out severity; even a brief violation matters.
+    # At 5 seconds or more, duration factor saturates.
+    dur = 0.5 + 0.5 * min(1.0, duration_s / 5.0)
+
+    # --- Altitude factor (0.5..1.0) ---
+    # Below 500 ft gets progressively more weight as you get closer to the ground.
+    # At 500 ft: factor ~0.5, at 0 ft: factor ~1.0.
+    alt = 0.5 + 0.5 * min(1.0, max(0.0, (profile.gate_ft - agl_min) / profile.gate_ft))
+
+    # Combine
+    score = 100.0 * mag * dur * alt
+    return float(score)
 
 
 # -----------------------------
@@ -320,7 +373,7 @@ def load_and_preprocess(csv_path: Path, runway_elev_m: float, profile: AircraftP
     if dt <= 0:
         raise ValueError("Time column 't' must be strictly increasing.")
     """
-    Let’s break it:
+    Let`s break it:
 
     np.diff(t) computes differences between consecutive times:
 
@@ -330,7 +383,7 @@ def load_and_preprocess(csv_path: Path, runway_elev_m: float, profile: AircraftP
     np.median(...) finds the median spacing.
     Using median instead of mean makes it robust to one weird glitch.
 
-    float(...) converts NumPy’s scalar type to a normal Python float.
+    float(...) converts NumPy`s scalar type to a normal Python float.
 
     So dt becomes something like 0.2.
     """
@@ -383,8 +436,8 @@ def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
     Extracts a basic approach window:
       1500 ft >= AGL >= 20 ft, descending (vs_s < -100 fpm)
     """
-    mask = (df["agl_ft"] <= 1500) & (df["agl_ft"] >= 20) & (df["vs_s"] < -100)    # This describes the definition of "approach" used by hte script. / For each row True if altitude is <= 1500 ft, False otherwise
-    approach = df.loc[mask].copy()    # Selects only hte rows where mask == True
+    mask = (df["agl_ft"] <= 1500) & (df["agl_ft"] >= 20) & (df["vs_s"] < -100)    # This describes the definition of "approach" used by the script. / For each row True if altitude is <= 1500 ft, False otherwise
+    approach = df.loc[mask].copy()    # Selects only the rows where mask == True
     approach.reset_index(drop=True, inplace=True)
     return approach
 """
@@ -406,7 +459,7 @@ def estimate_target_speed(approach: pd.DataFrame) -> float:
     return float(np.median(approach["ias_s"])) if len(approach) else float("nan")
 """
 This function estimates the intended approach speed by taking the median smoothed 
-airspeed in a stable altitude band (700–500 ft AGL), falling back to the whole approach if 
+airspeed in a stable altitude band (700-500 ft AGL), falling back to the whole approach if 
 needed, and returning NaN only when no valid data exists.
 """
 
@@ -455,10 +508,40 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
     events += find_continuous_events(t, agl, pitch_bad, profile.min_violation_duration_s, dt,
                                      "Pitch chasing", pitch_std, worst_mode="max")
 
+
+    events = sorted(events, key=lambda e: e.t_start)
+
+    # Compute severity per event
+    for e in events:
+        e.severity = compute_event_severity(e, profile)
+
+    # Combine into an overall severity (0..100)
+    # We combine probabilistically so multiple events increase severity but never exceed 100.
+    overall_severity = 100.0 * (1.0 - float(np.prod([1.0 - (e.severity / 100.0) for e in events]))) if events else 0.0
+
+
     # Basic label
     label = "Stable" if len(events) == 0 else "Unstable"    # If no events detected -> stable / If at least one event -> unstable
 
+
+    """
+    metrics = {"target_speed_kt": target, "overall_severity": float(overall_severity)}
+
+    if np.any(below_gate):
+        metrics.update({
+            "pct_speed_bad": float(100 * np.mean(speed_bad[below_gate])),
+            "pct_sink_bad": float(100 * np.mean(sink_bad[below_gate])),
+            "pct_bank_bad": float(100 * np.mean(bank_bad[below_gate])),
+            "pct_pitch_bad": float(100 * np.mean(pitch_bad[below_gate])),
+        })
+
+    """
+
+
+
     # Summary metrics (below gate)
+    # Compute summary metrics below the gate
+    # Percent of time below gate spent violating each rule
     if np.any(below_gate):    # np.any(...) returns True if at least one sample is below gate.
         metrics = {    # speed_bad[below_gate] => This selects only the values of speed_bad where below_gate is True. So You are looking ONLY at samples below gate
             "target_speed_kt": target,
@@ -466,19 +549,23 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
             "pct_sink_bad": float(100 * np.mean(sink_bad[below_gate])),
             "pct_bank_bad": float(100 * np.mean(bank_bad[below_gate])),
             "pct_pitch_bad": float(100 * np.mean(pitch_bad[below_gate])),
+            "overall_severity": float(overall_severity),
         }
     else:
-        metrics = {"target_speed_kt": target}
+        metrics = {
+            "target_speed_kt": target,
+            "overall_severity": float(overall_severity),
+                   }
 
-    return label, target, sorted(events, key=lambda e: e.t_start), metrics
+    return label, target, events, metrics
 
 
 def write_report(out_base: Path, label: str, target: float, events: List[Event], metrics: Dict[str, float], profile: AircraftProfile) -> Path:
     """
     Writes a short text report to <out_base>.txt
     """
-    out_path = out_base.with_suffix(".txt")
-    lines = []
+    out_path = out_base.with_suffix(".txt")    # Build the output file path
+    lines = []    # Create a list to hold report lines
     lines.append(f"Approach Stability Report (MVP) — Aircraft profile: {profile.name}")
     lines.append(f"Gate: {profile.gate_ft:.0f} ft AGL")
     lines.append(f"Result: {label}")
@@ -486,12 +573,15 @@ def write_report(out_base: Path, label: str, target: float, events: List[Event],
         lines.append(f"Estimated target approach speed: {target:.1f} kt")
     lines.append("")
 
-    if metrics:
+    if metrics:    # If metrics dictionary is not empty
         lines.append("Summary metrics below gate:")
         for k, v in metrics.items():
             if k == "target_speed_kt":
                 continue
-            lines.append(f"  - {k}: {v:.1f}%")
+            if k == "overall_severity":
+                lines.append(f"  - {k}: {v:.1f} (0-100)")
+            else:
+                lines.append(f"  - {k}: {v:.1f}%")
         lines.append("")
 
     if not events:
@@ -503,6 +593,23 @@ def write_report(out_base: Path, label: str, target: float, events: List[Event],
                 f"  - {e.rule}: t={e.t_start:.1f}s→{e.t_end:.1f}s, "
                 f"AGL={e.agl_start_ft:.0f}→{e.agl_end_ft:.0f} ft, worst={e.worst_value:.2f}"
             )
+        lines.append("")
+
+    
+    if "overall_severity" in metrics:
+        lines.append(f"Overall severity (0-100): {metrics['overall_severity']:.1f}")
+        lines.append("")
+
+    if events:
+        lines.append("Detected unstable events:")
+        for e in events:
+            lines.append(
+                f"  - {e.rule}: t={e.t_start:.1f}s→{e.t_end:.1f}s, "
+                f"AGL={e.agl_start_ft:.0f}→{e.agl_end_ft:.0f} ft, "
+                f"worst={e.worst_value:.2f}, severity={e.severity:.1f}"
+            )
+
+
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")
@@ -514,76 +621,186 @@ def save_plot(out_base: Path, approach: pd.DataFrame, events: List[Event], profi
     Saves a matplotlib plot to <out_base>.png highlighting unstable intervals.
     """
     out_path = out_base.with_suffix(".png")
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)    # Ensures output directory exists / Prevents file write errors / parents=True create nested folder / exist_ok=True means don’t error if directory already exists
 
-    t = approach["t"].to_numpy(float)
-    agl = approach["agl_ft"].to_numpy(float)
+    #convert Pandas columns to NumPy arrays
+    t = approach["t"].to_numpy(float)    # t -> time in seconds
+    agl = approach["agl_ft"].to_numpy(float)    # agl -> altitude above ground level in feet
 
     fig, ax = plt.subplots(figsize=(12, 7))
+    """
+    Creates a figure object and a primary axis (ax)
+
+    figsize=(12, 7) controls plot size in inches
+
+    ax is where most signals will be plotted
+    """
+
+
 
     # Plot key signals (normalized-ish by using second axis for AGL)
-    ax.plot(t, approach["ias_s"], label="IAS (kt)")
-    ax.plot(t, approach["vs_s"], label="Vertical Speed (fpm)")
-    ax.plot(t, approach["roll_s"], label="Roll (deg)")
-    ax.plot(t, approach["pitch_std"], label="Pitch std (deg)")
+    ax.plot(t, approach["ias_s"], label="IAS (kt)", color="tab:blue", linewidth=2.0)    # Plot smoothed indicated airspeed vs time / Label used later in legend
+    ax.plot(t, approach["vs_s"], label="Vertical Speed (fpm)", color="tab:orange", linewidth=2.0)    # Plots smoothed vertical speed
+    ax.plot(t, approach["roll_s"], label="Roll (deg)", color="tab:green", linewidth=2.0)    # Plots smoothed roll angle
+    ax.plot(t, approach["pitch_std"], label="Pitch std (deg)", color="tab:red", linewidth=2.0, linestyle="-.")    # Plots pitch variability / This is not pitch angle, but instability metric
+    # All these signals share the same y-axis, even though units differ.
+    # This is acceptable for pattern visualization, not numeric reading.
 
-    if np.isfinite(target_speed):
-        ax.axhline(target_speed, linestyle="--", linewidth=1, label="Target IAS")
-        ax.axhline(target_speed + profile.speed_tol_kt, linestyle=":", linewidth=1, label="IAS band")
-        ax.axhline(target_speed - profile.speed_tol_kt, linestyle=":", linewidth=1)
 
-    ax.axhline(profile.sink_rate_limit_fpm, linestyle=":", linewidth=1, label="Sink limit")
-    ax.axhline(profile.bank_limit_deg, linestyle=":", linewidth=1, label="Bank limit")
-    ax.axhline(-profile.bank_limit_deg, linestyle=":", linewidth=1)
-    ax.axhline(profile.pitch_std_limit_deg, linestyle=":", linewidth=1, label="Pitch std limit")
+    if np.isfinite(target_speed):    # Checks that target speed is not NaN or infinite
+        ax.axhline(target_speed, linestyle="--", linewidth=1.5, color="tab:blue", alpha=0.8, label="Target IAS")    # Draws horizontal dashed line at target speed
+        ax.axhline(target_speed + profile.speed_tol_kt, linestyle=":", linewidth=1.5, color="tab:blue", alpha=0.6, label="IAS band")    # Draws horizontal dotted line at upper speed tolerance
+        ax.axhline(target_speed - profile.speed_tol_kt, linestyle=":", linewidth=1.5, color="tab:blue", alpha=0.6)    # Draws horizontal dotted line at lower speed tolerance
+
+    # Plot other rule limits
+    ax.axhline(profile.sink_rate_limit_fpm, linestyle=":", linewidth=1.5, color="tab:orange", alpha=0.6, label="Sink limit")    # Horizontal line ar -1000 fpm (default) / Show descent rate boundary
+    ax.axhline(profile.bank_limit_deg, linestyle=":", linewidth=1.5, color="tab:green", alpha=0.6, label="Bank limit")    # upper bank limit (+15 deg)
+    ax.axhline(-profile.bank_limit_deg, linestyle=":", linewidth=1.5, color="tab:green", alpha=0.6)    # lower bank limit (+15 deg)
+    ax.axhline(profile.pitch_std_limit_deg, linestyle=":", linewidth=1.5, color="tab:red", alpha=0.6, label="Pitch std limit")    # Shows pitch instability threshold
+    # Together, these lines shows the stability envelope visually
+
+
 
     # Highlight unstable intervals
     for e in events:
-        ax.axvspan(e.t_start, e.t_end, alpha=0.2)
+        ax.axvspan(e.t_start, e.t_end, alpha=0.18, color="grey")    # ax.axvspan(start, end) shades a vertical time region / alpha=0.2 makes it semi-transparent
+    """
+    For each detected Event:
 
-    ax.set_title(f"Approach Signals (Gate {profile.gate_ft:.0f} ft AGL) — Unstable intervals shaded")
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Signal values (mixed units)")
+    the time window where instability occurred is shaded
 
-    # Second axis for AGL (so we can “see” gate)
-    ax2 = ax.twinx()
-    ax2.plot(t, agl, linestyle="--", linewidth=1, label="AGL (ft)")
-    ax2.axhline(profile.gate_ft, linestyle="--", linewidth=1, label="Gate AGL")
-    ax2.set_ylabel("AGL (ft)")
+    overlaps multiple signals simultaneously
+
+    This answers visually:
+
+    “When did things go wrong?”
+    """
+
+
+    # Set plot title and labels
+    ax.set_title(f"Approach Signals (Gate {profile.gate_ft:.0f} ft AGL) — Unstable intervals shaded")    # Adds descriptive title. Includes gate altitude context
+    ax.set_xlabel("Time (s)")    # X-axis = time
+    ax.set_ylabel("Signal values (mixed units)")    # Y-axis explicitly state mixed units (important honesty)
+    ax.grid(True, alpha=0.2)
+
+    # Create second y-axis for altitude
+    ax2 = ax.twinx()    # Creates a second y-axis sharing the same x-axis / Used for altitude so scale doesn't interfere with other signals
+    ax2.plot(t, agl, linestyle="--", linewidth=1.8, color="tab:purple", alpha=0.9, label="AGL (ft)")    # Plots altitude vs time / Dashed line to distinguish from other signals
+    ax2.axhline(profile.gate_ft, linestyle="--", linewidth=1.5, color="tab:purple", alpha=0.7, label="Gate AGL")    # Horizontal line at gate altitude (500 ft) / Lets you visually see where the gate occurs
+    ax2.set_ylabel("AGL (ft)")    # Label second axis clearly
+
 
     # Combine legends from both axes
+    # Matplotlib treats each axis separately, so you must combine legends manually.
     lines1, labels1 = ax.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
+    # Extract legend entries from both axes
 
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
+    ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", framealpha=0.9)
+    # Combine into one legend / Place in upper-right corner
+
+
+    fig.tight_layout()    # Adjusts spacing to prevent label overlap / Especially important with twin axes
+    fig.savefig(out_path, dpi=150)    # Writes the image to file / dpi=150 gives good clarity without huge file size
+    plt.close(fig)    # Frees memory / Important when preprocessing many plots
+    
     return out_path
+    """
+    Allows caller to:
 
+    print path
+
+    log it
+
+    reference it later
+    """
 
 # -----------------------------
 # CLI entry point
 # -----------------------------
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser()    # argparse is Python’s standard library for command-line arguments.
     parser.add_argument("--input", type=str, required=True, help="Path to input CSV")
     parser.add_argument("--out", type=str, required=True, help="Output base path (no extension)")
     parser.add_argument("--runway_elev_m", type=float, default=450.0, help="Runway elevation MSL in meters")
     args = parser.parse_args()
+    """
+    Reads the actual command-line input
 
-    profile = AircraftProfile()
+    Converts it into an object args
 
-    csv_path = Path(args.input)
+    Attributes:
+
+    args.input
+
+    args.out
+
+    args.runway_elev_m
+
+    If arguments are missing or invalid, the program exits here with a helpful message.
+    """
+
+
+    profile = AircraftProfile()    # Instantiates the AircraftProfile dataclass
+
+    csv_path = Path(args.input)    # args.input and args.out are strings / Convert them into pathlib.Path objects
     out_base = Path(args.out)
 
+    # Run preprocessing
     df = load_and_preprocess(csv_path, runway_elev_m=args.runway_elev_m, profile=profile)
+    """
+    This step:
+
+    reads the CSV
+
+    validates columns
+
+    computes AGL
+
+    computes dt
+
+    smooths signals
+
+    computes pitch variability
+
+    Returns a fully prepared DataFrame.
+    """
+    
+
+    # Extract approach window
     approach = extract_approach_window(df)
+    """
+    This filters:
 
+    only 1500 - 20 ft AGL
+
+    only descending
+
+    Everything else is discarded.
+    """
+
+    # Detect unstable approach
     label, target, events, metrics = detect_unstable(approach, profile)
+    """
+    This is the core analysis.
 
-    report_path = write_report(out_base, label, target, events, metrics, profile)
-    plot_path = save_plot(out_base, approach, events, profile, target)
+    It returns:
+
+    label → Stable / Unstable
+
+    target → estimated approach speed
+
+    events → list of Event objects
+
+    metrics → summary percentages
+
+    Nothing is saved yet; this is pure computation.
+    """
+
+
+    # Write text report
+    report_path = write_report(out_base, label, target, events, metrics, profile)    # Creates <out_base>.txt / Returns the file path
+    plot_path = save_plot(out_base, approach, events, profile, target)    # Creates <out_base>.png / Visual explanation of the approach 
 
     print(f"Done.")
     print(f"Report: {report_path}")
@@ -592,3 +809,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+    """
+    What it means
+
+    If this file is run directly:
+
+    python mvp_detect_unstable_approach.py
+
+
+    → main() runs
+
+    If this file is imported:
+
+    import mvp_detect_unstable_approach
+
+
+    → main() does not run automatically
+
+    This allows:
+
+    reuse as a library
+
+    unit testing
+
+    safe imports
+    """
