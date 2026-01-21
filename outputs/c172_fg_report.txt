@@ -1,0 +1,27 @@
+Approach Stability Report (MVP) — Aircraft profile: C172 (MVP)
+Gate: 500 ft AGL
+Result: Unstable
+Estimated target approach speed: 75.0 kt
+
+Summary metrics below gate:
+  - pct_speed_bad: 35.5%
+  - pct_sink_bad: 20.0%
+  - pct_bank_bad: 0.0%
+  - pct_pitch_bad: 6.4%
+  - overall_severity: 96.9 (0-100)
+
+Detected unstable events:
+  - Speed out of band: t=9.4s→11.4s, AGL=480→460 ft, worst=14.53
+  - Pitch chasing: t=9.4s→12.2s, AGL=480→443 ft, worst=5.96
+  - High sink rate: t=11.0s→17.4s, AGL=463→339 ft, worst=-1398.60
+  - Speed out of band: t=20.2s→27.4s, AGL=292→186 ft, worst=11.39
+  - Speed out of band: t=47.0s→53.4s, AGL=51→20 ft, worst=18.62
+
+Overall severity (0-100): 96.9
+
+Detected unstable events:
+  - Speed out of band: t=9.4s→11.4s, AGL=480→460 ft, worst=14.53, severity=17.1
+  - Pitch chasing: t=9.4s→12.2s, AGL=480→443 ft, worst=5.96, severity=43.5
+  - High sink rate: t=11.0s→17.4s, AGL=463→339 ft, worst=-1398.60, severity=52.7
+  - Speed out of band: t=20.2s→27.4s, AGL=292→186 ft, worst=11.39, severity=11.3
+  - Speed out of band: t=47.0s→53.4s, AGL=51→20 ft, worst=18.62, severity=84.4

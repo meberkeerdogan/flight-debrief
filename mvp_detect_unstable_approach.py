@@ -102,15 +102,31 @@ A dataclass is basically a nicer dictionary with types.
 # -----------------------------
 # Helpers
 # -----------------------------
-def moving_average(x: np.ndarray, win: int) -> np.ndarray: # This is classic low-pass filtering: average neighboring points so fast jitter disappears. 
-    """Simple moving average with edge padding."""
+# def moving_average(x: np.ndarray, win: int) -> np.ndarray: # This is classic low-pass filtering: average neighboring points so fast jitter disappears. 
+#     """Simple moving average with edge padding."""
+#     if win <= 1:
+#         return x.copy()
+#     kernel = np.ones(win) / win # boxcar filter
+#     # pad edges to keep same length
+#     pad = win // 2
+#     xpad = np.pad(x, (pad, pad), mode="edge")
+#     return np.convolve(xpad, kernel, mode="valid")
+
+
+def moving_average(x: np.ndarray, win: int) -> np.ndarray:
+    """Simple moving average guaranteed to return same length as x."""
     if win <= 1:
         return x.copy()
-    kernel = np.ones(win) / win # boxcar filter
-    # pad edges to keep same length
-    pad = win // 2
-    xpad = np.pad(x, (pad, pad), mode="edge")
-    return np.convolve(xpad, kernel, mode="valid")
+
+    kernel = np.ones(win, dtype=float) / win
+
+    left = win // 2
+    right = win - 1 - left  # makes total pad = win-1
+    xpad = np.pad(x, (left, right), mode="edge")
+
+    y = np.convolve(xpad, kernel, mode="valid")  # length == len(x)
+    return y
+
 
 
 def rolling_std(x: np.ndarray, win: int) -> np.ndarray:
@@ -358,6 +374,30 @@ def load_and_preprocess(csv_path: Path, runway_elev_m: float, profile: AircraftP
     """
     df = pd.read_csv(csv_path)    # Read the CSV (a DataFrame is like a table: columns + rows)
 
+    
+    # Convert logger time to seconds (already seconds in your CSV)
+    df["t"] = df["Time"].astype(float)
+
+    # Drop only *exact* duplicate rows (same time + same telemetry)
+    dedupe_cols = ["t", "alt_msl_ft", "ias_kt", "vs_fps", "pitch_deg", "roll_deg", "throttle"]
+    dedupe_cols = [c for c in dedupe_cols if c in df.columns]  # safety
+    df = df.drop_duplicates(subset=dedupe_cols, keep="first").reset_index(drop=True)
+
+    # Sort by time
+    df = df.sort_values("t").reset_index(drop=True)
+
+    # Now enforce strictly increasing time by removing remaining duplicate timestamps
+    # (If any remain, they must differ in values; you said they usually don't, but this makes dt safe.)
+    df = df.loc[df["t"].diff().fillna(1.0) > 0].reset_index(drop=True)
+
+
+    # Convert altitude feet -> meters
+    df["alt_msl_m"] = df["alt_msl_ft"] * 0.3048
+
+    # Convert vertical speed feet/sec -> feet/min
+    df["vs_fpm"] = df["vs_fps"] * 60.0
+
+
     required = ["t", "alt_msl_m", "ias_kt", "vs_fpm", "pitch_deg", "roll_deg", "throttle"]    # Needed Column names
     missing = [c for c in required if c not in df.columns]
     if missing:
@@ -367,11 +407,21 @@ def load_and_preprocess(csv_path: Path, runway_elev_m: float, profile: AircraftP
     df["agl_ft"] = (df["alt_msl_m"] - runway_elev_m) * 3.28084
     # All stability rules are framed in feet AGL (500 ft gate, 1500–20 ft window, etc.)
 
-    # Estimate dt from median spacing
-    t = df["t"].to_numpy(dtype=float)    # .to_numpy(dtype=float) converts it into a NumPy array of floats. / We use NumPy because np.diff, np.median, etc. work naturally on arrays.
-    dt = float(np.median(np.diff(t)))
-    if dt <= 0:
-        raise ValueError("Time column 't' must be strictly increasing.")
+    # Estimate dt from median positive spacing
+    t = df["t"].to_numpy(dtype=float)
+
+    dts = np.diff(t)
+    dts = dts[dts > 0]  # ignore non-positive (shouldn't exist after cleanup)
+    if len(dts) == 0:
+        raise ValueError("Time column 't' must contain increasing values to estimate dt.")
+
+    dt = float(np.median(dts))
+
+    # Optional sanity check
+    if dt > 0.5:
+        print(f"Warning: large dt={dt:.3f}s detected; data may be low-rate or timestamps quantized.")
+
+
     """
     Let`s break it:
 
@@ -406,6 +456,12 @@ def load_and_preprocess(csv_path: Path, runway_elev_m: float, profile: AircraftP
     df["pitch_std"] = rolling_std(df["pitch_s"].to_numpy(float), pitch_std_win)
 
     df.attrs["dt"] = dt    # This puts dt into the DataFrame’s attribute dictionary.
+
+    print("Rows after cleanup:", len(df))
+    print("dt:", df.attrs["dt"])
+    print("t min/max:", df["t"].iloc[0], df["t"].iloc[-1])
+
+
     return df
     # Now the caller receives a DataFrame with original and derived columns
 """
@@ -431,20 +487,78 @@ This is basically the “data cleaning + feature engineering” step of your pip
 
 
 
+# def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
+#     """
+#     Extracts a basic approach window:
+#       1500 ft >= AGL >= 20 ft, descending (vs_s < -100 fpm)
+#     """
+#     mask = (df["agl_ft"] <= 1500) & (df["agl_ft"] >= 20) & (df["vs_s"] < -100)    # This describes the definition of "approach" used by the script. / For each row True if altitude is <= 1500 ft, False otherwise
+#     approach = df.loc[mask].copy()    # Selects only the rows where mask == True
+#     approach.reset_index(drop=True, inplace=True)
+#     return approach
+# """
+# This function filters the flight data down to the actual approach phase by selecting rows 
+# where the aircraft is between 1500 and 20 ft AGL and clearly descending, returning a clean, 
+# index-reset DataFrame ready for stability analysis.
+# """
+
+
+# def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
+#     """
+#     Extract the final continuous approach segment:
+#     descending, between 1500 ft and 20 ft AGL.
+#     """
+#     cond = (
+#         (df["agl_ft"] <= 1500) &
+#         (df["agl_ft"] >= 20) &
+#         (df["vs_s"] < -100)
+#     )
+
+#     idx = np.where(cond.to_numpy())[0]
+#     if len(idx) == 0:
+#         return df.iloc[0:0].copy()  # empty
+
+#     # Split into continuous index blocks
+#     breaks = np.where(np.diff(idx) > 1)[0] + 1
+#     segments = np.split(idx, breaks)
+
+#     # Choose the LAST segment (final approach)
+#     last_seg = segments[-1]
+
+#     approach = df.iloc[last_seg].copy()
+#     approach.reset_index(drop=True, inplace=True)
+#     return approach
+
+
 def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Extracts a basic approach window:
-      1500 ft >= AGL >= 20 ft, descending (vs_s < -100 fpm)
+    Extract the final continuous segment where the aircraft is in the
+    approach altitude band (1500..20 ft AGL). Don't require vs_s < -100,
+    because flare/float would get cut out.
     """
-    mask = (df["agl_ft"] <= 1500) & (df["agl_ft"] >= 20) & (df["vs_s"] < -100)    # This describes the definition of "approach" used by the script. / For each row True if altitude is <= 1500 ft, False otherwise
-    approach = df.loc[mask].copy()    # Selects only the rows where mask == True
+    in_band = (df["agl_ft"] <= 1500) & (df["agl_ft"] >= -20)
+
+    idx = np.where(in_band.to_numpy())[0]
+    if len(idx) == 0:
+        return df.iloc[0:0].copy()  # empty
+
+    # Split into continuous index blocks
+    breaks = np.where(np.diff(idx) > 1)[0] + 1
+    segments = np.split(idx, breaks)
+
+    # Choose the segment that gets closest to the ground (lowest AGL)
+    def seg_score(seg):
+        agl_min = float(df.iloc[seg]["agl_ft"].min())
+        length = len(seg)
+        # prioritize lowest AGL, then longer segment
+        return (agl_min, -length)
+
+    best_seg = min(segments, key=seg_score)
+
+    approach = df.iloc[best_seg].copy()
     approach.reset_index(drop=True, inplace=True)
     return approach
-"""
-This function filters the flight data down to the actual approach phase by selecting rows 
-where the aircraft is between 1500 and 20 ft AGL and clearly descending, returning a clean, 
-index-reset DataFrame ready for stability analysis.
-"""
+
 
 
 
@@ -616,110 +730,199 @@ def write_report(out_base: Path, label: str, target: float, events: List[Event],
     return out_path
 
 
-def save_plot(out_base: Path, approach: pd.DataFrame, events: List[Event], profile: AircraftProfile, target_speed: float) -> Path:
+
+def save_plot(out_base: Path, approach: pd.DataFrame, events: List[Event],
+              profile: AircraftProfile, target_speed: float) -> Path:
     """
-    Saves a matplotlib plot to <out_base>.png highlighting unstable intervals.
+    Saves a multi-panel matplotlib plot to <out_base>.png highlighting unstable intervals.
+    Panels: IAS, VS, Roll, Pitch std, and AGL.
     """
     out_path = out_base.with_suffix(".png")
-    out_path.parent.mkdir(parents=True, exist_ok=True)    # Ensures output directory exists / Prevents file write errors / parents=True create nested folder / exist_ok=True means don’t error if directory already exists
+    out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    #convert Pandas columns to NumPy arrays
-    t = approach["t"].to_numpy(float)    # t -> time in seconds
-    agl = approach["agl_ft"].to_numpy(float)    # agl -> altitude above ground level in feet
+    t = approach["t"].to_numpy(float)
+    agl = approach["agl_ft"].to_numpy(float)
+    ias = approach["ias_s"].to_numpy(float)
+    vs  = approach["vs_s"].to_numpy(float)
+    roll = approach["roll_s"].to_numpy(float)
+    pstd = approach["pitch_std"].to_numpy(float)
 
-    fig, ax = plt.subplots(figsize=(12, 7))
-    """
-    Creates a figure object and a primary axis (ax)
-
-    figsize=(12, 7) controls plot size in inches
-
-    ax is where most signals will be plotted
-    """
-
-
-
-    # Plot key signals (normalized-ish by using second axis for AGL)
-    ax.plot(t, approach["ias_s"], label="IAS (kt)", color="tab:blue", linewidth=2.0)    # Plot smoothed indicated airspeed vs time / Label used later in legend
-    ax.plot(t, approach["vs_s"], label="Vertical Speed (fpm)", color="tab:orange", linewidth=2.0)    # Plots smoothed vertical speed
-    ax.plot(t, approach["roll_s"], label="Roll (deg)", color="tab:green", linewidth=2.0)    # Plots smoothed roll angle
-    ax.plot(t, approach["pitch_std"], label="Pitch std (deg)", color="tab:red", linewidth=2.0, linestyle="-.")    # Plots pitch variability / This is not pitch angle, but instability metric
-    # All these signals share the same y-axis, even though units differ.
-    # This is acceptable for pattern visualization, not numeric reading.
-
-
-    if np.isfinite(target_speed):    # Checks that target speed is not NaN or infinite
-        ax.axhline(target_speed, linestyle="--", linewidth=1.5, color="tab:blue", alpha=0.8, label="Target IAS")    # Draws horizontal dashed line at target speed
-        ax.axhline(target_speed + profile.speed_tol_kt, linestyle=":", linewidth=1.5, color="tab:blue", alpha=0.6, label="IAS band")    # Draws horizontal dotted line at upper speed tolerance
-        ax.axhline(target_speed - profile.speed_tol_kt, linestyle=":", linewidth=1.5, color="tab:blue", alpha=0.6)    # Draws horizontal dotted line at lower speed tolerance
-
-    # Plot other rule limits
-    ax.axhline(profile.sink_rate_limit_fpm, linestyle=":", linewidth=1.5, color="tab:orange", alpha=0.6, label="Sink limit")    # Horizontal line ar -1000 fpm (default) / Show descent rate boundary
-    ax.axhline(profile.bank_limit_deg, linestyle=":", linewidth=1.5, color="tab:green", alpha=0.6, label="Bank limit")    # upper bank limit (+15 deg)
-    ax.axhline(-profile.bank_limit_deg, linestyle=":", linewidth=1.5, color="tab:green", alpha=0.6)    # lower bank limit (+15 deg)
-    ax.axhline(profile.pitch_std_limit_deg, linestyle=":", linewidth=1.5, color="tab:red", alpha=0.6, label="Pitch std limit")    # Shows pitch instability threshold
-    # Together, these lines shows the stability envelope visually
-
-
-
-    # Highlight unstable intervals
-    for e in events:
-        ax.axvspan(e.t_start, e.t_end, alpha=0.18, color="grey")    # ax.axvspan(start, end) shades a vertical time region / alpha=0.2 makes it semi-transparent
-    """
-    For each detected Event:
-
-    the time window where instability occurred is shaded
-
-    overlaps multiple signals simultaneously
-
-    This answers visually:
-
-    “When did things go wrong?”
-    """
-
-
-    # Set plot title and labels
-    ax.set_title(f"Approach Signals (Gate {profile.gate_ft:.0f} ft AGL) — Unstable intervals shaded")    # Adds descriptive title. Includes gate altitude context
-    ax.set_xlabel("Time (s)")    # X-axis = time
-    ax.set_ylabel("Signal values (mixed units)")    # Y-axis explicitly state mixed units (important honesty)
-    ax.grid(True, alpha=0.2)
-
-    # Create second y-axis for altitude
-    ax2 = ax.twinx()    # Creates a second y-axis sharing the same x-axis / Used for altitude so scale doesn't interfere with other signals
-    ax2.plot(t, agl, linestyle="--", linewidth=1.8, color="tab:purple", alpha=0.9, label="AGL (ft)")    # Plots altitude vs time / Dashed line to distinguish from other signals
-    ax2.axhline(profile.gate_ft, linestyle="--", linewidth=1.5, color="tab:purple", alpha=0.7, label="Gate AGL")    # Horizontal line at gate altitude (500 ft) / Lets you visually see where the gate occurs
-    ax2.set_ylabel("AGL (ft)")    # Label second axis clearly
-
-
-    # Combine legends from both axes
-    # Matplotlib treats each axis separately, so you must combine legends manually.
-    lines1, labels1 = ax.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    # Extract legend entries from both axes
-
-    ax.legend(
-        lines1 + lines2,
-        labels1 + labels2,
-        loc="center left",
-        bbox_to_anchor=(1.06, 0.8),
-        framealpha=0.95
+    # 5 stacked panels, shared x
+    fig, axes = plt.subplots(
+        nrows=5, ncols=1, figsize=(14, 11), sharex=True,
+        gridspec_kw={"height_ratios": [1.2, 1.2, 1.0, 1.0, 1.0]}
     )
+    ax_ias, ax_vs, ax_roll, ax_pstd, ax_agl = axes
 
+    # --- Panel 1: IAS ---
+    ax_ias.plot(t, ias, linewidth=2.0, label="IAS (kt)")
+    if np.isfinite(target_speed):
+        ax_ias.axhline(target_speed, linestyle="--", linewidth=1.5, label="Target IAS")
+        ax_ias.axhline(target_speed + profile.speed_tol_kt, linestyle=":", linewidth=1.2, label="IAS band")
+        ax_ias.axhline(target_speed - profile.speed_tol_kt, linestyle=":", linewidth=1.2)
+    ax_ias.set_ylabel("IAS (kt)")
+    ax_ias.grid(True, alpha=0.2)
+    ax_ias.legend(loc="upper right")
 
+    # --- Panel 2: Vertical speed ---
+    ax_vs.plot(t, vs, linewidth=2.0, label="VS (fpm)")
+    ax_vs.axhline(profile.sink_rate_limit_fpm, linestyle=":", linewidth=1.5, label="Sink limit")
+    ax_vs.set_ylabel("VS (fpm)")
+    ax_vs.grid(True, alpha=0.2)
+    ax_vs.legend(loc="upper right")
 
-    fig.subplots_adjust(right=0.78)
-    fig.savefig(out_path, dpi=150)    # Writes the image to file / dpi=150 gives good clarity without huge file size
-    plt.close(fig)    # Frees memory / Important when preprocessing many plots
-    
+    # --- Panel 3: Roll ---
+    ax_roll.plot(t, roll, linewidth=2.0, label="Roll (deg)")
+    ax_roll.axhline(profile.bank_limit_deg, linestyle=":", linewidth=1.5, label="Bank limit")
+    ax_roll.axhline(-profile.bank_limit_deg, linestyle=":", linewidth=1.5)
+    ax_roll.set_ylabel("Roll (deg)")
+    ax_roll.grid(True, alpha=0.2)
+    ax_roll.legend(loc="upper right")
+
+    # --- Panel 4: Pitch std ---
+    ax_pstd.plot(t, pstd, linewidth=2.0, linestyle="-.", label="Pitch std (deg)")
+    ax_pstd.axhline(profile.pitch_std_limit_deg, linestyle=":", linewidth=1.5, label="Pitch std limit")
+    ax_pstd.set_ylabel("Pitch std (deg)")
+    ax_pstd.grid(True, alpha=0.2)
+    ax_pstd.legend(loc="upper right")
+
+    # --- Panel 5: AGL ---
+    ax_agl.plot(t, agl, linewidth=2.0, linestyle="--", label="AGL (ft)")
+    ax_agl.axhline(profile.gate_ft, linestyle="--", linewidth=1.5, label="Gate AGL")
+    ax_agl.set_ylabel("AGL (ft)")
+    ax_agl.set_xlabel("Time (s)")
+    ax_agl.grid(True, alpha=0.2)
+    ax_agl.legend(loc="upper right")
+
+    # Shade unstable intervals across ALL panels
+    for e in events:
+        for ax in axes:
+            ax.axvspan(e.t_start, e.t_end, alpha=0.18, color="grey")
+
+    fig.suptitle(f"Approach Signals — Gate {profile.gate_ft:.0f} ft AGL (events shaded)", y=0.995)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
     return out_path
-    """
-    Allows caller to:
 
-    print path
 
-    log it
 
-    reference it later
-    """
+
+
+
+
+
+# def save_plot(out_base: Path, approach: pd.DataFrame, events: List[Event], profile: AircraftProfile, target_speed: float) -> Path:
+#     """
+#     Saves a matplotlib plot to <out_base>.png highlighting unstable intervals.
+#     """
+#     out_path = out_base.with_suffix(".png")
+#     out_path.parent.mkdir(parents=True, exist_ok=True)    # Ensures output directory exists / Prevents file write errors / parents=True create nested folder / exist_ok=True means don’t error if directory already exists
+
+#     #convert Pandas columns to NumPy arrays
+#     t = approach["t"].to_numpy(float)    # t -> time in seconds
+#     agl = approach["agl_ft"].to_numpy(float)    # agl -> altitude above ground level in feet
+
+#     fig, ax = plt.subplots(figsize=(12, 7))
+#     """
+#     Creates a figure object and a primary axis (ax)
+
+#     figsize=(12, 7) controls plot size in inches
+
+#     ax is where most signals will be plotted
+#     """
+
+
+
+#     # Plot key signals (normalized-ish by using second axis for AGL)
+#     ax.plot(t, approach["ias_s"], label="IAS (kt)", color="tab:blue", linewidth=2.0)    # Plot smoothed indicated airspeed vs time / Label used later in legend
+#     ax.plot(t, approach["vs_s"], label="Vertical Speed (fpm)", color="tab:orange", linewidth=2.0)    # Plots smoothed vertical speed
+#     ax.plot(t, approach["roll_s"], label="Roll (deg)", color="tab:green", linewidth=2.0)    # Plots smoothed roll angle
+#     ax.plot(t, approach["pitch_std"], label="Pitch std (deg)", color="tab:red", linewidth=2.0, linestyle="-.")    # Plots pitch variability / This is not pitch angle, but instability metric
+#     # All these signals share the same y-axis, even though units differ.
+#     # This is acceptable for pattern visualization, not numeric reading.
+
+
+#     if np.isfinite(target_speed):    # Checks that target speed is not NaN or infinite
+#         ax.axhline(target_speed, linestyle="--", linewidth=1.5, color="tab:blue", alpha=0.8, label="Target IAS")    # Draws horizontal dashed line at target speed
+#         ax.axhline(target_speed + profile.speed_tol_kt, linestyle=":", linewidth=1.5, color="tab:blue", alpha=0.6, label="IAS band")    # Draws horizontal dotted line at upper speed tolerance
+#         ax.axhline(target_speed - profile.speed_tol_kt, linestyle=":", linewidth=1.5, color="tab:blue", alpha=0.6)    # Draws horizontal dotted line at lower speed tolerance
+
+#     # Plot other rule limits
+#     ax.axhline(profile.sink_rate_limit_fpm, linestyle=":", linewidth=1.5, color="tab:orange", alpha=0.6, label="Sink limit")    # Horizontal line ar -1000 fpm (default) / Show descent rate boundary
+#     ax.axhline(profile.bank_limit_deg, linestyle=":", linewidth=1.5, color="tab:green", alpha=0.6, label="Bank limit")    # upper bank limit (+15 deg)
+#     ax.axhline(-profile.bank_limit_deg, linestyle=":", linewidth=1.5, color="tab:green", alpha=0.6)    # lower bank limit (+15 deg)
+#     ax.axhline(profile.pitch_std_limit_deg, linestyle=":", linewidth=1.5, color="tab:red", alpha=0.6, label="Pitch std limit")    # Shows pitch instability threshold
+#     # Together, these lines shows the stability envelope visually
+
+
+
+#     # Highlight unstable intervals
+#     for e in events:
+#         ax.axvspan(e.t_start, e.t_end, alpha=0.18, color="grey")    # ax.axvspan(start, end) shades a vertical time region / alpha=0.2 makes it semi-transparent
+#     """
+#     For each detected Event:
+
+#     the time window where instability occurred is shaded
+
+#     overlaps multiple signals simultaneously
+
+#     This answers visually:
+
+#     “When did things go wrong?”
+#     """
+
+
+#     # Set plot title and labels
+#     ax.set_title(f"Approach Signals (Gate {profile.gate_ft:.0f} ft AGL) — Unstable intervals shaded")    # Adds descriptive title. Includes gate altitude context
+#     ax.set_xlabel("Time (s)")    # X-axis = time
+#     ax.set_ylabel("Signal values (mixed units)")    # Y-axis explicitly state mixed units (important honesty)
+#     ax.grid(True, alpha=0.2)
+
+#     # Create second y-axis for altitude
+#     ax2 = ax.twinx()    # Creates a second y-axis sharing the same x-axis / Used for altitude so scale doesn't interfere with other signals
+#     ax2.plot(t, agl, linestyle="--", linewidth=1.8, color="tab:purple", alpha=0.9, label="AGL (ft)")    # Plots altitude vs time / Dashed line to distinguish from other signals
+#     ax2.axhline(profile.gate_ft, linestyle="--", linewidth=1.5, color="tab:purple", alpha=0.7, label="Gate AGL")    # Horizontal line at gate altitude (500 ft) / Lets you visually see where the gate occurs
+#     ax2.set_ylabel("AGL (ft)")    # Label second axis clearly
+
+
+#     # Combine legends from both axes
+#     # Matplotlib treats each axis separately, so you must combine legends manually.
+#     lines1, labels1 = ax.get_legend_handles_labels()
+#     lines2, labels2 = ax2.get_legend_handles_labels()
+#     # Extract legend entries from both axes
+
+#     ax.legend(
+#         lines1 + lines2,
+#         labels1 + labels2,
+#         loc="center left",
+#         bbox_to_anchor=(1.06, 0.8),
+#         framealpha=0.95
+#     )
+
+
+
+#     fig.subplots_adjust(right=0.78)
+#     fig.savefig(out_path, dpi=150)    # Writes the image to file / dpi=150 gives good clarity without huge file size
+#     plt.close(fig)    # Frees memory / Important when preprocessing many plots
+    
+#     return out_path
+#     """
+#     Allows caller to:
+
+#     print path
+
+#     log it
+
+#     reference it later
+#     """
+
+
+
+
+
+
+
 
 # -----------------------------
 # CLI entry point
@@ -775,6 +978,10 @@ def main():
 
     # Extract approach window
     approach = extract_approach_window(df)
+    print("Approach t min/max:", approach["t"].iloc[0], approach["t"].iloc[-1])
+    print("Approach AGL min/max:", approach["agl_ft"].min(), approach["agl_ft"].max())
+    print("Approach rows:", len(approach))
+
     """
     This filters:
 
