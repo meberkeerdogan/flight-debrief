@@ -48,7 +48,7 @@ class AircraftProfile:
     sink_rate_limit_fpm: float = -1000.0    # too-fast descent threshold (-1000 fpm) 
     bank_limit_deg: float = 15.0    # bank limit (±15°)
 
-    pitch_std_window_s: float = 5.0     # “pitch chasing” proxy: rolling standard deviation of pitch over 5 seconds; if > 2°, call it unstable
+    pitch_std_window_s: float = 5.0     # “pitch chasing” proxy: rolling standard deviation of pitch over 5 seconds; if > 2°, call it unstable / not "pitch too high" but "pitch is oscillating a lot", which indicates over-control and poor energy management
     pitch_std_limit_deg: float = 2.0
 
     smooth_window_s: float = 1.0    # smoothing length (1 sec moving average)
@@ -64,6 +64,7 @@ class Event:    # This is a “detected violation segment”: name, time window,
     agl_end_ft: float # Altitude AGL (feet) at end of event
     worst_value: float # How bad did it get during this event?
     severity: float = 0.0  # severity score 
+# A dataclass, but not frozen, because you later do: e.severity = compute_event_severity(e, profile)
 
 """
 For the worst_value field, its meaning depends on the rule:
@@ -102,20 +103,10 @@ A dataclass is basically a nicer dictionary with types.
 # -----------------------------
 # Helpers
 # -----------------------------
-# def moving_average(x: np.ndarray, win: int) -> np.ndarray: # This is classic low-pass filtering: average neighboring points so fast jitter disappears. 
-#     """Simple moving average with edge padding."""
-#     if win <= 1:
-#         return x.copy()
-#     kernel = np.ones(win) / win # boxcar filter
-#     # pad edges to keep same length
-#     pad = win // 2
-#     xpad = np.pad(x, (pad, pad), mode="edge")
-#     return np.convolve(xpad, kernel, mode="valid")
-
 
 def moving_average(x: np.ndarray, win: int) -> np.ndarray:
     """Simple moving average guaranteed to return same length as x."""
-    if win <= 1:
+    if win <= 1:    # If the window size is 1 or smaller: No smoothing needed / return a copy of the input array
         return x.copy()
 
     kernel = np.ones(win, dtype=float) / win
@@ -455,7 +446,7 @@ def load_and_preprocess(csv_path: Path, runway_elev_m: float, profile: AircraftP
     pitch_std_win = max(1, int(round(profile.pitch_std_window_s / dt)))
     df["pitch_std"] = rolling_std(df["pitch_s"].to_numpy(float), pitch_std_win)
 
-    df.attrs["dt"] = dt    # This puts dt into the DataFrame’s attribute dictionary.
+    df.attrs["dt"] = dt    # This puts dt into the DataFrame’s attribute dictionary. / Stores dt in DataFrame metadata (attrs). / That is a nice trick: downstream functions like detect_unstable can retrieve dt without recomputing it.
 
     print("Rows after cleanup:", len(df))
     print("dt:", df.attrs["dt"])
@@ -486,51 +477,7 @@ This is basically the “data cleaning + feature engineering” step of your pip
 
 
 
-
-# def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
-#     """
-#     Extracts a basic approach window:
-#       1500 ft >= AGL >= 20 ft, descending (vs_s < -100 fpm)
-#     """
-#     mask = (df["agl_ft"] <= 1500) & (df["agl_ft"] >= 20) & (df["vs_s"] < -100)    # This describes the definition of "approach" used by the script. / For each row True if altitude is <= 1500 ft, False otherwise
-#     approach = df.loc[mask].copy()    # Selects only the rows where mask == True
-#     approach.reset_index(drop=True, inplace=True)
-#     return approach
-# """
-# This function filters the flight data down to the actual approach phase by selecting rows 
-# where the aircraft is between 1500 and 20 ft AGL and clearly descending, returning a clean, 
-# index-reset DataFrame ready for stability analysis.
-# """
-
-
-# def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
-#     """
-#     Extract the final continuous approach segment:
-#     descending, between 1500 ft and 20 ft AGL.
-#     """
-#     cond = (
-#         (df["agl_ft"] <= 1500) &
-#         (df["agl_ft"] >= 20) &
-#         (df["vs_s"] < -100)
-#     )
-
-#     idx = np.where(cond.to_numpy())[0]
-#     if len(idx) == 0:
-#         return df.iloc[0:0].copy()  # empty
-
-#     # Split into continuous index blocks
-#     breaks = np.where(np.diff(idx) > 1)[0] + 1
-#     segments = np.split(idx, breaks)
-
-#     # Choose the LAST segment (final approach)
-#     last_seg = segments[-1]
-
-#     approach = df.iloc[last_seg].copy()
-#     approach.reset_index(drop=True, inplace=True)
-#     return approach
-
-
-def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
+def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:    # Takes a pandas DataFrame containing the whole flight / Returns another DataFrame containing only the approach segment
     """
     Extract the final continuous segment where the aircraft is in the
     approach altitude band (1500..20 ft AGL). Don't require vs_s < -100,
@@ -538,7 +485,7 @@ def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
     """
     in_band = (df["agl_ft"] <= 1500) & (df["agl_ft"] >= -20)
 
-    idx = np.where(in_band.to_numpy())[0]
+    idx = np.where(in_band.to_numpy())[0]    # np.where(condition) returns the indices where condition is True. / But the return type is important: It returns a tuple of arrays, one array per dimension. / For a 1D condition array, it returns a tuple with one element: (np.array([2,3,4,...]),) / So np.where(...)[0] extracts that first (and only) array from the tuple.
     if len(idx) == 0:
         return df.iloc[0:0].copy()  # empty
 
@@ -586,7 +533,7 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
       label: "Stable" or "Unstable"
       target_speed_kt
       events: list of Event
-      metrics: summary numbers for report
+      metrics: summary numbers for report (dict)
     """
     if len(approach) < 5:
         return "Insufficient data", float("nan"), [], {}
@@ -596,7 +543,7 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
     t = approach["t"].to_numpy(float)
     agl = approach["agl_ft"].to_numpy(float)
 
-    target = estimate_target_speed(approach)
+    target = estimate_target_speed(approach)    # Your speed rule measures deviation from "what the pilot was trying to fly", not from a fixed hardcoded number.
 
     below_gate = agl <= profile.gate_ft    # profile.gate_ft is 500.0 by default / Example: if agl = [600, 520, 480, 300] below_gate = [False, False, True, True]
 
@@ -612,7 +559,7 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
     bank_bad = below_gate & (np.abs(roll) > profile.bank_limit_deg)
     pitch_bad = below_gate & (pitch_std > profile.pitch_std_limit_deg)
 
-    events: List[Event] = []
+    events: List[Event] = []    # Creates an empty list of Event objects
     events += find_continuous_events(t, agl, speed_bad, profile.min_violation_duration_s, dt,
                                      "Speed out of band", speed_err, worst_mode="absmax")
     events += find_continuous_events(t, agl, sink_bad, profile.min_violation_duration_s, dt,
@@ -809,144 +756,25 @@ def save_plot(out_base: Path, approach: pd.DataFrame, events: List[Event],
 
 
 
-
-
-
-# def save_plot(out_base: Path, approach: pd.DataFrame, events: List[Event], profile: AircraftProfile, target_speed: float) -> Path:
-#     """
-#     Saves a matplotlib plot to <out_base>.png highlighting unstable intervals.
-#     """
-#     out_path = out_base.with_suffix(".png")
-#     out_path.parent.mkdir(parents=True, exist_ok=True)    # Ensures output directory exists / Prevents file write errors / parents=True create nested folder / exist_ok=True means don’t error if directory already exists
-
-#     #convert Pandas columns to NumPy arrays
-#     t = approach["t"].to_numpy(float)    # t -> time in seconds
-#     agl = approach["agl_ft"].to_numpy(float)    # agl -> altitude above ground level in feet
-
-#     fig, ax = plt.subplots(figsize=(12, 7))
-#     """
-#     Creates a figure object and a primary axis (ax)
-
-#     figsize=(12, 7) controls plot size in inches
-
-#     ax is where most signals will be plotted
-#     """
-
-
-
-#     # Plot key signals (normalized-ish by using second axis for AGL)
-#     ax.plot(t, approach["ias_s"], label="IAS (kt)", color="tab:blue", linewidth=2.0)    # Plot smoothed indicated airspeed vs time / Label used later in legend
-#     ax.plot(t, approach["vs_s"], label="Vertical Speed (fpm)", color="tab:orange", linewidth=2.0)    # Plots smoothed vertical speed
-#     ax.plot(t, approach["roll_s"], label="Roll (deg)", color="tab:green", linewidth=2.0)    # Plots smoothed roll angle
-#     ax.plot(t, approach["pitch_std"], label="Pitch std (deg)", color="tab:red", linewidth=2.0, linestyle="-.")    # Plots pitch variability / This is not pitch angle, but instability metric
-#     # All these signals share the same y-axis, even though units differ.
-#     # This is acceptable for pattern visualization, not numeric reading.
-
-
-#     if np.isfinite(target_speed):    # Checks that target speed is not NaN or infinite
-#         ax.axhline(target_speed, linestyle="--", linewidth=1.5, color="tab:blue", alpha=0.8, label="Target IAS")    # Draws horizontal dashed line at target speed
-#         ax.axhline(target_speed + profile.speed_tol_kt, linestyle=":", linewidth=1.5, color="tab:blue", alpha=0.6, label="IAS band")    # Draws horizontal dotted line at upper speed tolerance
-#         ax.axhline(target_speed - profile.speed_tol_kt, linestyle=":", linewidth=1.5, color="tab:blue", alpha=0.6)    # Draws horizontal dotted line at lower speed tolerance
-
-#     # Plot other rule limits
-#     ax.axhline(profile.sink_rate_limit_fpm, linestyle=":", linewidth=1.5, color="tab:orange", alpha=0.6, label="Sink limit")    # Horizontal line ar -1000 fpm (default) / Show descent rate boundary
-#     ax.axhline(profile.bank_limit_deg, linestyle=":", linewidth=1.5, color="tab:green", alpha=0.6, label="Bank limit")    # upper bank limit (+15 deg)
-#     ax.axhline(-profile.bank_limit_deg, linestyle=":", linewidth=1.5, color="tab:green", alpha=0.6)    # lower bank limit (+15 deg)
-#     ax.axhline(profile.pitch_std_limit_deg, linestyle=":", linewidth=1.5, color="tab:red", alpha=0.6, label="Pitch std limit")    # Shows pitch instability threshold
-#     # Together, these lines shows the stability envelope visually
-
-
-
-#     # Highlight unstable intervals
-#     for e in events:
-#         ax.axvspan(e.t_start, e.t_end, alpha=0.18, color="grey")    # ax.axvspan(start, end) shades a vertical time region / alpha=0.2 makes it semi-transparent
-#     """
-#     For each detected Event:
-
-#     the time window where instability occurred is shaded
-
-#     overlaps multiple signals simultaneously
-
-#     This answers visually:
-
-#     “When did things go wrong?”
-#     """
-
-
-#     # Set plot title and labels
-#     ax.set_title(f"Approach Signals (Gate {profile.gate_ft:.0f} ft AGL) — Unstable intervals shaded")    # Adds descriptive title. Includes gate altitude context
-#     ax.set_xlabel("Time (s)")    # X-axis = time
-#     ax.set_ylabel("Signal values (mixed units)")    # Y-axis explicitly state mixed units (important honesty)
-#     ax.grid(True, alpha=0.2)
-
-#     # Create second y-axis for altitude
-#     ax2 = ax.twinx()    # Creates a second y-axis sharing the same x-axis / Used for altitude so scale doesn't interfere with other signals
-#     ax2.plot(t, agl, linestyle="--", linewidth=1.8, color="tab:purple", alpha=0.9, label="AGL (ft)")    # Plots altitude vs time / Dashed line to distinguish from other signals
-#     ax2.axhline(profile.gate_ft, linestyle="--", linewidth=1.5, color="tab:purple", alpha=0.7, label="Gate AGL")    # Horizontal line at gate altitude (500 ft) / Lets you visually see where the gate occurs
-#     ax2.set_ylabel("AGL (ft)")    # Label second axis clearly
-
-
-#     # Combine legends from both axes
-#     # Matplotlib treats each axis separately, so you must combine legends manually.
-#     lines1, labels1 = ax.get_legend_handles_labels()
-#     lines2, labels2 = ax2.get_legend_handles_labels()
-#     # Extract legend entries from both axes
-
-#     ax.legend(
-#         lines1 + lines2,
-#         labels1 + labels2,
-#         loc="center left",
-#         bbox_to_anchor=(1.06, 0.8),
-#         framealpha=0.95
-#     )
-
-
-
-#     fig.subplots_adjust(right=0.78)
-#     fig.savefig(out_path, dpi=150)    # Writes the image to file / dpi=150 gives good clarity without huge file size
-#     plt.close(fig)    # Frees memory / Important when preprocessing many plots
-    
-#     return out_path
-#     """
-#     Allows caller to:
-
-#     print path
-
-#     log it
-
-#     reference it later
-#     """
-
-
-
-
-
-
-
-
 # -----------------------------
 # CLI entry point
 # -----------------------------
 def main():
-    parser = argparse.ArgumentParser()    # argparse is Python’s standard library for command-line arguments.
+    parser = argparse.ArgumentParser()    # creates an ArgumentParser object / argparse is Python’s standard library for command-line arguments.
     parser.add_argument("--input", type=str, required=True, help="Path to input CSV")
     parser.add_argument("--out", type=str, required=True, help="Output base path (no extension)")
-    parser.add_argument("--runway_elev_m", type=float, default=450.0, help="Runway elevation MSL in meters")
+    parser.add_argument("--runway_elev_m", type=float, default=450.0, help="Runway elevation MSL in meters") # Default can be changed
     args = parser.parse_args()
     """
-    Reads the actual command-line input
-
-    Converts it into an object args
-
-    Attributes:
+    Parses the actual command-line arguments and returns an object (a Namespace).
+    After this, you can access:
 
     args.input
 
     args.out
 
     args.runway_elev_m
-
-    If arguments are missing or invalid, the program exits here with a helpful message.
+    Why: This is the moment the CLI becomes real values your program can use. If required args are missing or types are invalid, argparse prints a nice error and exits.
     """
 
 
@@ -978,9 +806,16 @@ def main():
 
     # Extract approach window
     approach = extract_approach_window(df)
-    print("Approach t min/max:", approach["t"].iloc[0], approach["t"].iloc[-1])
-    print("Approach AGL min/max:", approach["agl_ft"].min(), approach["agl_ft"].max())
-    print("Approach rows:", len(approach))
+    
+    # For debugging
+    if len(approach) == 0:
+        print("No approach segment found in 1500-20 ft AGL band.")
+        return
+    else:
+        print("Approach t min/max:", approach["t"].iloc[0], approach["t"].iloc[-1])
+        print("Approach AGL min/max:", approach["agl_ft"].min(), approach["agl_ft"].max())
+        print("Approach rows:", len(approach))
+
 
     """
     This filters:
