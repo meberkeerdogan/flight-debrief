@@ -234,7 +234,7 @@ def find_continuous_events(
 
 
     events: List[Event] = [] # creates an empty list named events / This will be filled with Event(...) objects
-    min_len = int(np.ceil(min_dur_s / dt)) # min_dur_s / dt converts seconds → number of samples. / np.ceil(...) rounds up (so you don’t accidentally accept shorter-than-required events).
+    min_len = int(np.ceil(min_dur_s / dt)) # min_dur_s / dt converts seconds → number of samples. / np.ceil(...) rounds up if dt doesn't divide evenly (so you don’t accidentally accept shorter-than-required events).
     """
     Example:
 
@@ -652,7 +652,8 @@ def write_report(out_base: Path, label: str, target: float, events: List[Event],
         for e in events:
             lines.append(
                 f"  - {e.rule}: t={e.t_start:.1f}s→{e.t_end:.1f}s, "
-                f"AGL={e.agl_start_ft:.0f}→{e.agl_end_ft:.0f} ft, worst={e.worst_value:.2f}"
+                f"AGL={e.agl_start_ft:.0f}→{e.agl_end_ft:.0f} ft, "
+                f"worst={e.worst_value:.2f}, severity={e.severity:.1f}"
             )
         lines.append("")
 
@@ -660,15 +661,6 @@ def write_report(out_base: Path, label: str, target: float, events: List[Event],
     if "overall_severity" in metrics:
         lines.append(f"Overall severity (0-100): {metrics['overall_severity']:.1f}")
         lines.append("")
-
-    if events:
-        lines.append("Detected unstable events:")
-        for e in events:
-            lines.append(
-                f"  - {e.rule}: t={e.t_start:.1f}s→{e.t_end:.1f}s, "
-                f"AGL={e.agl_start_ft:.0f}→{e.agl_end_ft:.0f} ft, "
-                f"worst={e.worst_value:.2f}, severity={e.severity:.1f}"
-            )
 
 
 
