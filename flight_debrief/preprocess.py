@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from .domain import AircraftProfile
-
+from .nav import cross_track_ft
 
 # -----------------------------
 # Helpers
@@ -110,10 +110,28 @@ This is exactly what pilots call “pitch chasing”.
 
 CSVSource = Union[str, Path, IO[bytes], IO[str]]
 
+def _get_runway_field(runway, *names):
+    """
+    Try to read a field from runway either as attribute or dict key.
+    Example: _get_runway_field(runway, "thr_lat_deg", "thr_lat")
+    """
+    if runway is None:
+        return None
+    for n in names:
+        # attribute style
+        if hasattr(runway, n):
+            return getattr(runway, n)
+        # dict style
+        if isinstance(runway, dict) and n in runway:
+            return runway[n]
+    return None
+
+
+
 # -----------------------------
 # Core pipeline
 # -----------------------------
-def load_and_preprocess(csv_source: CSVSource, runway_elev_m: float, profile: AircraftProfile) -> pd.DataFrame:
+def load_and_preprocess(csv_source: CSVSource, runway_elev_m: float, profile: AircraftProfile, runway=None) -> pd.DataFrame:
     """
     Loads CSV and adds derived/smoothed signals.
 
@@ -172,6 +190,25 @@ def load_and_preprocess(csv_source: CSVSource, runway_elev_m: float, profile: Ai
         raise ValueError(
             f"No vertical speed column found. Expected 'vs_fpm' or 'vs_fps'. Found: {list(df.columns)}"
         )
+
+    # Optional: centerline deviation if lat/lon exist AND runway geometry exists
+    if runway is not None and ("lat_deg" in df.columns) and ("lon_deg" in df.columns):
+        thr_lat = _get_runway_field(runway, "thr_lat_deg", "thr_lat")
+        thr_lon = _get_runway_field(runway, "thr_lon_deg", "thr_lon")
+        brg     = _get_runway_field(runway, "true_brg_deg", "true_brg", "bearing_deg")
+
+        if thr_lat is not None and thr_lon is not None and brg is not None:
+            df["xtrack_ft"] = cross_track_ft(
+                df["lat_deg"].to_numpy(float),
+                df["lon_deg"].to_numpy(float),
+                float(thr_lat),
+                float(thr_lon),
+                float(brg),
+            )
+        else:
+            # Don't crash; just skip xtrack
+            # (Optional: print for debugging)
+            print("Runway geometry missing fields; skipping xtrack.")
 
 
 

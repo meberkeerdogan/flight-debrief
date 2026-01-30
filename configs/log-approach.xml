@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<PropertyList>
+  <logging>
+    <log>
+      <enabled>true</enabled>
+      <filename>C:/Users/berke/AppData/Roaming/flightgear.org/Export/approach_log.csv</filename>
+      <interval-ms>200</interval-ms>
+      <delimiter>,</delimiter>
+
+      <entry>
+        <enabled>true</enabled>
+        <title>alt_msl_ft</title>
+        <property>/position/altitude-ft</property>
+        <type>float</type>
+      </entry>
+
+      <entry>
+        <enabled>true</enabled>
+        <title>ias_kt</title>
+        <property>/velocities/airspeed-kt</property>
+        <type>float</type>
+      </entry>
+
+      <entry>
+        <enabled>true</enabled>
+        <title>vs_fps</title>
+        <property>/velocities/vertical-speed-fps</property>
+        <type>float</type>
+      </entry>
+
+      <entry>
+        <enabled>true</enabled>
+        <title>pitch_deg</title>
+        <property>/orientation/pitch-deg</property>
+        <type>float</type>
+      </entry>
+
+      <entry>
+        <enabled>true</enabled>
+        <title>roll_deg</title>
+        <property>/orientation/roll-deg</property>
+        <type>float</type>
+      </entry>
+
+      <entry>
+        <enabled>true</enabled>
+        <title>throttle</title>
+        <property>/controls/engines/engine[0]/throttle</property>
+        <type>float</type>
+      </entry>
+
+    <entry>
+        <enabled>true</enabled>
+        <title>lat_deg</title>
+        <property>/position/latitude-deg</property>
+        <type>float</type>
+    </entry>
+      
+    <entry>
+        <enabled>true</enabled>
+        <title>lon_deg</title>
+        <property>/position/longitude-deg</property>
+        <type>float</type>
+    </entry>
+
+    </log>
+  </logging>
+</PropertyList>

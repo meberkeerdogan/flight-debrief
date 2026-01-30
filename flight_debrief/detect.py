@@ -1,10 +1,10 @@
 from . domain import AircraftProfile, Event
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 import numpy as np
 import pandas as pd
 from .approach import estimate_target_speed
-
-
+from .airports import Runway
+from .centerline import cross_track_error_m
 
 def find_continuous_events(
     t: np.ndarray,     # numpy array of time stamps (seconds). Example: [0.0, 0.2, 0.4, ...]
@@ -168,7 +168,7 @@ def compute_event_severity(e: Event, profile: AircraftProfile) -> float:
 
 
 
-def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[str, float, List[Event], Dict[str, float]]:
+def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile, runway: Optional[Runway] = None) -> Tuple[str, float, List[Event], Dict[str, float]]:
     """
     Runs rule-based detection below profile.gate_ft.
 
@@ -202,6 +202,55 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
     bank_bad = below_gate & (np.abs(roll) > profile.bank_limit_deg)
     pitch_bad = below_gate & (pitch_std > profile.pitch_std_limit_deg)
 
+        # --- Centerline rule (optional) ---
+    centerline_events: List[Event] = []
+    centerline_metrics: Dict[str, float] = {}
+
+    if runway is not None:
+        # Try common column names (choose what your FlightGear log uses)
+        lat_col = None
+        lon_col = None
+        for c in ["lat_deg", "latitude_deg", "latitude", "lat"]:
+            if c in approach.columns:
+                lat_col = c
+                break
+        for c in ["lon_deg", "longitude_deg", "longitude", "lon", "lng"]:
+            if c in approach.columns:
+                lon_col = c
+                break
+
+        if lat_col and lon_col:
+            lat = approach[lat_col].to_numpy(float)
+            lon = approach[lon_col].to_numpy(float)
+
+            # signed cross-track error in meters
+            cte_m = cross_track_error_m(
+                lat, lon,
+                runway.thr_lat_deg, runway.thr_lon_deg,
+                runway.end_lat_deg, runway.end_lon_deg,
+            )
+
+            # store for plotting later if you want
+            approach["centerline_err_m"] = cte_m
+
+            below_cl_gate = agl <= getattr(profile, "centerline_gate_ft", 200.0)
+            tol_m = getattr(profile, "centerline_tol_m", 12.0)
+
+            centerline_bad = below_cl_gate & (np.abs(cte_m) > tol_m)
+
+            centerline_events = find_continuous_events(
+                t, agl, centerline_bad,
+                profile.min_violation_duration_s, dt,
+                "Off centerline", cte_m, worst_mode="absmax"
+            )
+
+            if np.any(below_cl_gate):
+                centerline_metrics = {
+                    "pct_centerline_bad": float(100 * np.mean(centerline_bad[below_cl_gate])),
+                    "centerline_p95_m": float(np.nanpercentile(np.abs(cte_m[below_cl_gate]), 95)),
+                }
+
+
     events: List[Event] = []    # Creates an empty list of Event objects
     events += find_continuous_events(t, agl, speed_bad, profile.min_violation_duration_s, dt,
                                      "Speed out of band", speed_err, worst_mode="absmax")
@@ -211,7 +260,7 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
                                      "Excessive bank", roll, worst_mode="absmax")
     events += find_continuous_events(t, agl, pitch_bad, profile.min_violation_duration_s, dt,
                                      "Pitch chasing", pitch_std, worst_mode="max")
-
+    events += centerline_events
 
     events = sorted(events, key=lambda e: e.t_start)
 
@@ -228,20 +277,6 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
     label = "Stable" if len(events) == 0 else "Unstable"    # If no events detected -> stable / If at least one event -> unstable
 
 
-    """
-    metrics = {"target_speed_kt": target, "overall_severity": float(overall_severity)}
-
-    if np.any(below_gate):
-        metrics.update({
-            "pct_speed_bad": float(100 * np.mean(speed_bad[below_gate])),
-            "pct_sink_bad": float(100 * np.mean(sink_bad[below_gate])),
-            "pct_bank_bad": float(100 * np.mean(bank_bad[below_gate])),
-            "pct_pitch_bad": float(100 * np.mean(pitch_bad[below_gate])),
-        })
-
-    """
-
-
 
     # Summary metrics (below gate)
     # Compute summary metrics below the gate
@@ -253,6 +288,7 @@ def detect_unstable(approach: pd.DataFrame, profile: AircraftProfile) -> Tuple[s
             "pct_sink_bad": float(100 * np.mean(sink_bad[below_gate])),
             "pct_bank_bad": float(100 * np.mean(bank_bad[below_gate])),
             "pct_pitch_bad": float(100 * np.mean(pitch_bad[below_gate])),
+            **centerline_metrics,  # merge in centerline metrics if any
             "overall_severity": float(overall_severity),
         }
     else:

@@ -4,7 +4,7 @@ import pandas as pd
 from flight_debrief.domain import AircraftProfile
 from flight_debrief.analyze import analyze
 from flight_debrief.render import make_plot_figure
-
+from flight_debrief.airports import AIRPORTS
 
 # -----------------------------
 # Preset profiles
@@ -74,7 +74,24 @@ def _load_profile_into_state(p: AircraftProfile) -> None:
 # -----------------------------
 with st.sidebar:
     st.header("Settings")
-    runway_elev_m = st.number_input("Runway elevation (MSL) in meters", value=450.0, step=1.0)
+    
+    st.subheader("Airport / Runway")
+    airport_icao = st.selectbox("Airport", options=list(AIRPORTS.keys()), index=0)
+    airport = AIRPORTS[airport_icao]
+
+    runway_id = st.selectbox("Landing runway", options=list(airport.runways.keys()), index=0)
+    runway = airport.runways[runway_id]
+
+    runway_elev_m = runway.thr_elev_m
+    runway_elev_m_default = runway.thr_elev_m
+    st.caption(f"Default RWY {runway_id} threshold elev: {runway.thr_elev_ft:.1f} ft ({runway_elev_m_default:.1f} m)")
+
+    override = st.checkbox("Override runway elevation", value=False)
+    if override:
+        runway_elev_m = st.number_input("Runway elevation (MSL) in meters", value=float(runway_elev_m_default), step=1.0)
+    else:
+        runway_elev_m = runway_elev_m_default
+
 
     st.divider()
     st.header("Aircraft profile")
@@ -180,7 +197,7 @@ uploaded.seek(0)
 # Run analysis
 # -----------------------------
 try:
-    result, err = analyze(uploaded, runway_elev_m=runway_elev_m, profile=profile)
+    result, err = analyze(uploaded, runway_elev_m=runway_elev_m, profile=profile, runway=runway)
 except Exception as e:
     st.error(f"Error while analyzing file: {e}")
     st.stop()
