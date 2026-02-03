@@ -214,7 +214,7 @@ approach, label, target, events, metrics = result
 # -----------------------------
 col1, col2, col3 = st.columns([1, 1, 1])
 col1.metric("Result", label)
-col2.metric("Target IAS (kt)", f"{target:.1f}" if target == target else "NaN")
+col2.metric("Target IAS (kt)", f"{target:.1f}" if pd.notna(target) else "N/A")
 col3.metric("Overall severity", f"{metrics.get('overall_severity', 0.0):.1f}")
 
 st.subheader("Summary metrics (below gate)")

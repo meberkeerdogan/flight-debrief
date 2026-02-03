@@ -41,16 +41,11 @@ def moving_average(x: np.ndarray, win: int) -> np.ndarray:
 
 
 def rolling_std(x: np.ndarray, win: int) -> np.ndarray:
-    """Rolling standard deviation (same length, edge-padded)."""
+    """Rolling standard deviation (same length, center-aligned)."""
     if win <= 1:
         return np.zeros_like(x)
-    pad = win // 2
-    xpad = np.pad(x, (pad, pad), mode="edge")
-    out = np.zeros_like(x, dtype=float)
-    for i in range(len(x)):
-        w = xpad[i : i + win]
-        out[i] = float(np.std(w))
-    return out
+    # Use pandas rolling for vectorized performance (much faster than Python loop)
+    return pd.Series(x).rolling(win, center=True, min_periods=1).std().fillna(0.0).to_numpy()
 
 """
 rolling_std computes the local variability of a signal.
@@ -211,9 +206,8 @@ def load_and_preprocess(csv_source: CSVSource, runway_elev_m: float, profile: Ai
 
     dt = float(np.median(dts))
 
-    # Optional sanity check
-    if dt > 0.5:
-        print(f"Warning: large dt={dt:.3f}s detected; data may be low-rate or timestamps quantized.")
+    # Optional sanity check - large dt may indicate low-rate data
+    # (Warning handled silently; UI can check df.attrs["dt"] if needed)
 
 
     """
@@ -249,12 +243,7 @@ def load_and_preprocess(csv_source: CSVSource, runway_elev_m: float, profile: Ai
     pitch_std_win = max(1, int(round(profile.pitch_std_window_s / dt)))
     df["pitch_std"] = rolling_std(df["pitch_s"].to_numpy(float), pitch_std_win)
 
-    df.attrs["dt"] = dt    # This puts dt into the DataFrame’s attribute dictionary. / Stores dt in DataFrame metadata (attrs). / That is a nice trick: downstream functions like detect_unstable can retrieve dt without recomputing it.
-
-    print("Rows after cleanup:", len(df))
-    print("dt:", df.attrs["dt"])
-    print("t min/max:", df["t"].iloc[0], df["t"].iloc[-1])
-
+    df.attrs["dt"] = dt    # This puts dt into the DataFrame's attribute dictionary. / Stores dt in DataFrame metadata (attrs). / That is a nice trick: downstream functions like detect_unstable can retrieve dt without recomputing it.
 
     return df
     # Now the caller receives a DataFrame with original and derived columns

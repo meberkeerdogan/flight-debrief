@@ -20,33 +20,17 @@ def make_plot_figure(
     roll = approach["roll_s"].to_numpy(float)
     pstd = approach["pitch_std"].to_numpy(float)
 
-    has_xtrack = "xtrack_ft" in approach.columns
-    xtrack = approach["xtrack_ft"].to_numpy(float) if has_xtrack else None
-
     # --- Build layout ---
-    if has_xtrack:
-        nrows = 6
-        height_ratios = [1.2, 1.2, 1.0, 1.0, 1.0, 1.0]
-        fig, axes = plt.subplots(
-            nrows=nrows,
-            ncols=1,
-            figsize=(14, 12),
-            sharex=True,
-            gridspec_kw={"height_ratios": height_ratios},
-        )
-        ax_ias, ax_vs, ax_roll, ax_pstd, ax_xtrk, ax_agl = axes
-    else:
-        nrows = 5
-        height_ratios = [1.2, 1.2, 1.0, 1.0, 1.0]
-        fig, axes = plt.subplots(
-            nrows=nrows,
-            ncols=1,
-            figsize=(14, 11),
-            sharex=True,
-            gridspec_kw={"height_ratios": height_ratios},
-        )
-        ax_ias, ax_vs, ax_roll, ax_pstd, ax_agl = axes
-        ax_xtrk = None
+    nrows = 5
+    height_ratios = [1.2, 1.2, 1.0, 1.0, 1.0]
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=1,
+        figsize=(14, 11),
+        sharex=True,
+        gridspec_kw={"height_ratios": height_ratios},
+    )
+    ax_ias, ax_vs, ax_roll, ax_pstd, ax_agl = axes
 
     # --- IAS ---
     ax_ias.plot(t, ias, linewidth=2.0, label="IAS (kt)")
@@ -80,14 +64,6 @@ def make_plot_figure(
     ax_pstd.grid(True, alpha=0.2)
     ax_pstd.legend(loc="upper right")
 
-    # --- XTrack / Centerline deviation ---
-    if has_xtrack and ax_xtrk is not None and xtrack is not None:
-        ax_xtrk.plot(t, xtrack, linewidth=2.0, label="XTrack (ft)")
-        ax_xtrk.axhline(0.0, linestyle="--", linewidth=1.5, label="Centerline")
-        ax_xtrk.set_ylabel("XTrack (ft)")
-        ax_xtrk.grid(True, alpha=0.2)
-        ax_xtrk.legend(loc="upper right")
-
     # --- AGL ---
     ax_agl.plot(t, agl, linewidth=2.0, linestyle="--", label="AGL (ft)")
     ax_agl.axhline(profile.gate_ft, linestyle="--", linewidth=1.5, label="Gate AGL")
@@ -96,17 +72,14 @@ def make_plot_figure(
     ax_agl.grid(True, alpha=0.2)
     ax_agl.legend(loc="upper right")
 
-    # --- Per-rule shading (THIS is the key fix) ---
+    # --- Per-rule shading ---
     # Only shade the subplot that corresponds to the rule
     rule_to_ax = {
         "Speed out of band": ax_ias,
         "High sink rate": ax_vs,
         "Excessive bank": ax_roll,
         "Pitch chasing": ax_pstd,
-        # Future: "Off centerline": ax_xtrk,
     }
-    if ax_xtrk is not None:
-        rule_to_ax["Off centerline"] = ax_xtrk  # if you add this rule later
 
     span_alpha = 0.18
 

@@ -1,4 +1,4 @@
-from . domain import AircraftProfile, Event
+from .domain import AircraftProfile, Event
 from typing import List, Tuple, Dict, Optional
 import numpy as np
 import pandas as pd

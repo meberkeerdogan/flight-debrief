@@ -20,9 +20,6 @@ class AircraftProfile:
     smooth_window_s: float = 1.0    # smoothing length (1 sec moving average)
     min_violation_duration_s: float = 2.0   # rule must persist for at least 2 seconds to become an event
 
-    centerline_gate_ft: float = 1000.0  # below this AGL, check cross-track error against centerline (1000 ft AGL)
-    centerline_tolerance_m: float = 12.0   # max allowed cross-track error (±30 m)
-
 @dataclass
 class Event:    # This is a “detected violation segment”: name, time window, altitude window, and the worst observed value during that interval.
     rule: str   # Which rule triggered this event (e.g., "Speed out of band", "High sink rate", "Pitch chasing" etc.)
