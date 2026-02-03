@@ -1,66 +1,54 @@
+"""Domain models for flight approach stability analysis."""
+
 from __future__ import annotations
 from dataclasses import dataclass
 
 
-# -----------------------------
-# Configuration / "Aircraft Profile"
-# -----------------------------
-@dataclass(frozen=True)     # immutable dataclass (frozen=True means immutable)
+@dataclass(frozen=True)
 class AircraftProfile:
+    """
+    Aircraft-specific stability thresholds and detection parameters.
+
+    Attributes:
+        name: Profile identifier
+        gate_ft: Altitude AGL below which stability is evaluated
+        speed_tol_kt: Allowed speed deviation from target (±)
+        sink_rate_limit_fpm: Maximum descent rate (negative value)
+        bank_limit_deg: Maximum bank angle (±)
+        pitch_std_window_s: Window for pitch variability calculation
+        pitch_std_limit_deg: Maximum allowed pitch standard deviation
+        smooth_window_s: Signal smoothing window duration
+        min_violation_duration_s: Minimum duration to count as violation
+    """
     name: str = "C172 (MVP)"
-    gate_ft: float = 500.0  # below this altitude, you start judging stability (500 ft AGL)
-
-    speed_tol_kt: float = 10.0 # Speed error band (± 10 kt)
-    sink_rate_limit_fpm: float = -1000.0    # too-fast descent threshold (-1000 fpm) 
-    bank_limit_deg: float = 15.0    # bank limit (±15°)
-
-    pitch_std_window_s: float = 5.0     # “pitch chasing” proxy: rolling standard deviation of pitch over 5 seconds; if > 2°, call it unstable / not "pitch too high" but "pitch is oscillating a lot", which indicates over-control and poor energy management
+    gate_ft: float = 500.0
+    speed_tol_kt: float = 10.0
+    sink_rate_limit_fpm: float = -1000.0
+    bank_limit_deg: float = 15.0
+    pitch_std_window_s: float = 5.0
     pitch_std_limit_deg: float = 2.0
+    smooth_window_s: float = 1.0
+    min_violation_duration_s: float = 2.0
 
-    smooth_window_s: float = 1.0    # smoothing length (1 sec moving average)
-    min_violation_duration_s: float = 2.0   # rule must persist for at least 2 seconds to become an event
 
 @dataclass
-class Event:    # This is a “detected violation segment”: name, time window, altitude window, and the worst observed value during that interval.
-    rule: str   # Which rule triggered this event (e.g., "Speed out of band", "High sink rate", "Pitch chasing" etc.)
-    t_start: float # The time (seconds) when the event started
-    t_end: float # The time (seconds) when the event ended
-    agl_start_ft: float # Altitude AGL (feet) at start of event
-    agl_end_ft: float # Altitude AGL (feet) at end of event
-    worst_value: float # How bad did it get during this event?
-    severity: float = 0.0  # severity score 
-# A dataclass, but not frozen, because you later do: e.severity = compute_event_severity(e, profile)
+class Event:
+    """
+    A detected stability violation during approach.
 
-"""
-For the worst_value field, its meaning depends on the rule:
-| Rule              | worst_value meaning               |
-| ----------------- | --------------------------------- |
-| High sink rate    | most negative VS (e.g. -1279 fpm) |
-| Speed out of band | largest speed error magnitude     |
-| Excessive bank    | largest bank angle                |
-| Pitch chasing     | highest pitch std                 |
-
-During the approach, you don't just want to know “something went wrong”.
-
-You want to know:
-
-what went wrong (speed? sink rate? bank?)
-
-when it happened
-
-for how long
-
-at what altitude
-
-how bad it got
-
-An Event is a structured record of one unstable episode.
-
-Think of it as a flight incident log entry, not a single data point.
-
-This a object that only stores data, not behavior (methods).
-A dataclass is basically a nicer dictionary with types.
-
-"""
-
-# These are your "types", used everywhere. Centralizing them prevents circular imports and chaos.
+    Attributes:
+        rule: Which stability rule was violated
+        t_start: Event start time (seconds)
+        t_end: Event end time (seconds)
+        agl_start_ft: Altitude AGL at event start
+        agl_end_ft: Altitude AGL at event end
+        worst_value: Most extreme value during violation
+        severity: Computed severity score (0-100)
+    """
+    rule: str
+    t_start: float
+    t_end: float
+    agl_start_ft: float
+    agl_end_ft: float
+    worst_value: float
+    severity: float = 0.0

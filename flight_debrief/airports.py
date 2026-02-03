@@ -1,9 +1,23 @@
+"""Airport and runway data for approach analysis."""
+
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Dict
+
 
 @dataclass(frozen=True)
 class Runway:
+    """
+    Runway physical characteristics.
+
+    Attributes:
+        ident: Runway identifier (e.g., "01", "28L")
+        thr_lat_deg: Threshold latitude in decimal degrees
+        thr_lon_deg: Threshold longitude in decimal degrees
+        end_lat_deg: Runway end latitude in decimal degrees
+        end_lon_deg: Runway end longitude in decimal degrees
+        true_brg_deg: True bearing of runway heading
+        thr_elev_ft: Threshold elevation in feet MSL
+    """
     ident: str
     thr_lat_deg: float
     thr_lon_deg: float
@@ -14,30 +28,27 @@ class Runway:
 
     @property
     def thr_elev_m(self) -> float:
+        """Threshold elevation in meters MSL."""
         return self.thr_elev_ft * 0.3048
 
 
 @dataclass(frozen=True)
 class Airport:
+    """
+    Airport with associated runways.
+
+    Attributes:
+        icao: ICAO airport code
+        name: Human-readable airport name
+        runways: Dictionary of runway identifier to Runway object
+    """
     icao: str
     name: str
-    runways: Dict[str, Runway]
+    runways: dict[str, Runway]
 
 
-# BIKF values from Iceland eAIP "BIKF AD 2.12 RUNWAY PHYSICAL CHARACTERISTICS"
-# THR coords are in DMS-ish format (DDMMSS.ssN / DDDMMSS.ssW) in the table.
-# Here we hardcode decimal degrees equivalents for MVP simplicity.
-# Source: eAIP Iceland (Isavia) table lines for RWY 01/19/10/28. :contentReference[oaicite:1]{index=1}
-
-# Helper conversions (precomputed for brevity):
-# 635752.12N -> 63 + 57/60 + 52.12/3600 = 63.9644778
-# 0223619.63W -> -(22 + 36/60 + 19.63/3600) = -22.6054528
-# 635930.76N -> 63.9918778
-# 0223619.56W -> -22.6054333
-# 635906.14N -> 63.9850389
-# 0223918.02W -> -22.6550056
-# 0223532.61W -> -22.5923917
-
+# Keflavík International Airport (BIKF)
+# Source: Iceland eAIP "BIKF AD 2.12 RUNWAY PHYSICAL CHARACTERISTICS"
 BIKF = Airport(
     icao="BIKF",
     name="Keflavík International (KEF)",
@@ -81,6 +92,7 @@ BIKF = Airport(
     },
 )
 
-AIRPORTS: Dict[str, Airport] = {
+# Registry of available airports
+AIRPORTS: dict[str, Airport] = {
     "BIKF": BIKF,
 }

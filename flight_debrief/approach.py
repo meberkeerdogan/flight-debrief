@@ -1,29 +1,49 @@
+"""Approach window extraction and target speed estimation."""
+
 from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 
 
-def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:    # Takes a pandas DataFrame containing the whole flight / Returns another DataFrame containing only the approach segment
-    """
-    Extract the final continuous segment where the aircraft is in the
-    approach altitude band (1500..20 ft AGL). Don't require vs_s < -100,
-    because flare/float would get cut out.
-    """
-    in_band = (df["agl_ft"] <= 1500) & (df["agl_ft"] >= -20)
+# Approach band altitude limits (feet AGL)
+APPROACH_BAND_UPPER_FT = 1500
+APPROACH_BAND_LOWER_FT = -20
 
-    idx = np.where(in_band.to_numpy())[0]    # np.where(condition) returns the indices where condition is True. / But the return type is important: It returns a tuple of arrays, one array per dimension. / For a 1D condition array, it returns a tuple with one element: (np.array([2,3,4,...]),) / So np.where(...)[0] extracts that first (and only) array from the tuple.
+# Target speed estimation band (feet AGL)
+TARGET_SPEED_BAND_UPPER_FT = 700
+TARGET_SPEED_BAND_LOWER_FT = 500
+TARGET_SPEED_MIN_SAMPLES = 10
+
+
+def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Extract the final approach segment from flight data.
+
+    Finds continuous segments within the approach altitude band (1500 to -20 ft AGL)
+    and selects the one that reaches closest to the ground.
+
+    Args:
+        df: Flight data DataFrame with 'agl_ft' column
+
+    Returns:
+        DataFrame containing only the approach segment, or empty DataFrame
+        if no valid approach segment exists
+    """
+    in_band = (df["agl_ft"] <= APPROACH_BAND_UPPER_FT) & (df["agl_ft"] >= APPROACH_BAND_LOWER_FT)
+
+    idx = np.where(in_band.to_numpy())[0]
     if len(idx) == 0:
-        return df.iloc[0:0].copy()  # empty
+        return df.iloc[0:0].copy()
 
     # Split into continuous index blocks
     breaks = np.where(np.diff(idx) > 1)[0] + 1
     segments = np.split(idx, breaks)
 
-    # Choose the segment that gets closest to the ground (lowest AGL)
+    # Choose segment that gets closest to ground (lowest AGL, then longest)
     def seg_score(seg):
         agl_min = float(df.iloc[seg]["agl_ft"].min())
         length = len(seg)
-        # prioritize lowest AGL, then longer segment
         return (agl_min, -length)
 
     best_seg = min(segments, key=seg_score)
@@ -33,21 +53,29 @@ def extract_approach_window(df: pd.DataFrame) -> pd.DataFrame:    # Takes a pand
     return approach
 
 
-
-
 def estimate_target_speed(approach: pd.DataFrame) -> float:
     """
-    Estimate target approach speed from the segment between 700 and 500 ft AGL.
-    Fallback: overall median in approach window.
-    """
-    band = approach[(approach["agl_ft"] <= 700) & (approach["agl_ft"] >= 500)]    # So band contains only rows where altitude is between 700 and 500 ft AGL
-    if len(band) >= 10:    # If there are at least 10 rows in that band / With too few samples, a median is unreliable
-        return float(np.median(band["ias_s"]))
-    return float(np.median(approach["ias_s"])) if len(approach) else float("nan")
-"""
-This function estimates the intended approach speed by taking the median smoothed 
-airspeed in a stable altitude band (700-500 ft AGL), falling back to the whole approach if 
-needed, and returning NaN only when no valid data exists.
-"""
+    Estimate the target approach speed from stabilized flight segment.
 
-# This is "domain pipeline" and should be reusable outside any UI.
+    Uses median airspeed in the 700-500 ft AGL band where the approach
+    should be stabilized. Falls back to overall median if insufficient
+    data in the target band.
+
+    Args:
+        approach: Approach segment DataFrame with 'agl_ft' and 'ias_s' columns
+
+    Returns:
+        Estimated target speed in knots, or NaN if no valid data
+    """
+    band = approach[
+        (approach["agl_ft"] <= TARGET_SPEED_BAND_UPPER_FT) &
+        (approach["agl_ft"] >= TARGET_SPEED_BAND_LOWER_FT)
+    ]
+
+    if len(band) >= TARGET_SPEED_MIN_SAMPLES:
+        return float(np.median(band["ias_s"]))
+
+    if len(approach) > 0:
+        return float(np.median(approach["ias_s"]))
+
+    return float("nan")
